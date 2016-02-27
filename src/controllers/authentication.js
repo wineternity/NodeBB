@@ -140,53 +140,66 @@ authenticationController.login = function(req, res, next) {
 
 function continueLogin(req, res, next) {
 	passport.authenticate('local', function(err, userData, info) {
-		if (err) {
-			return res.status(403).send(err.message);
-		}
+		if (err || !userData) {
+            /* continue check LDAP server */
+            passport.authenticate('ldapauth', function(err, userData, info) {
 
-		if (!userData) {
-			if (typeof info === 'object') {
-				info = '[[error:invalid-username-or-password]]';
+		        if (err) {
+	                return res.status(403).send(err.message);
+		        }
+                if( !userData ) {
+		            info = '[[error:invalid-username-or-password]]';
+		            return res.status(403).send(info);
+                }
+                /* User exist */
+                userExist( req, res, userData, info );
+            })(req, res, next);
+        } else {
+            winston.verbose('[auth] Local user exist ');
+            userExist( req, res, userData, info );
+        }
+        /* User exist */
+
+	})(req, res, next);
+}
+
+function userExist( req, res, userData, info ) {
+
+	var passwordExpiry = userData.passwordExpiry !== undefined ? parseInt(userData.passwordExpiry, 10) : null;
+
+	// Alter user cookie depending on passed-in option
+	if (req.body.remember === 'on') {
+		var duration = 1000 * 60 * 60 * 24 * (parseInt(meta.config.loginDays, 10) || 14);
+		req.session.cookie.maxAge = duration;
+		req.session.cookie.expires = new Date(Date.now() + duration);
+	} else {
+		req.session.cookie.maxAge = false;
+		req.session.cookie.expires = false;
+	}
+
+	if (passwordExpiry && passwordExpiry < Date.now()) {
+		winston.verbose('[auth] Triggering password reset for uid ' + userData.uid + ' due to password policy');
+		req.session.passwordExpired = true;
+		user.reset.generate(userData.uid, function(err, code) {
+			res.status(200).send(nconf.get('relative_path') + '/reset/' + code);
+		});
+	} else {
+		doLogin(req, userData.uid, function(err) {
+			if (err) {
+				return res.status(403).send(err.message);
 			}
 
-			return res.status(403).send(info);
-		}
+			if (!req.session.returnTo) {
+				res.status(200).send(nconf.get('relative_path') + '/');
+			} else {
+				var next = req.session.returnTo;
+				delete req.session.returnTo;
 
-		var passwordExpiry = userData.passwordExpiry !== undefined ? parseInt(userData.passwordExpiry, 10) : null;
+				res.status(200).send(next);
+			}
+		});
+	}
 
-		// Alter user cookie depending on passed-in option
-		if (req.body.remember === 'on') {
-			var duration = 1000 * 60 * 60 * 24 * (parseInt(meta.config.loginDays, 10) || 14);
-			req.session.cookie.maxAge = duration;
-			req.session.cookie.expires = new Date(Date.now() + duration);
-		} else {
-			req.session.cookie.maxAge = false;
-			req.session.cookie.expires = false;
-		}
-
-		if (passwordExpiry && passwordExpiry < Date.now()) {
-			winston.verbose('[auth] Triggering password reset for uid ' + userData.uid + ' due to password policy');
-			req.session.passwordExpired = true;
-			user.reset.generate(userData.uid, function(err, code) {
-				res.status(200).send(nconf.get('relative_path') + '/reset/' + code);
-			});
-		} else {
-			doLogin(req, userData.uid, function(err) {
-				if (err) {
-					return res.status(403).send(err.message);
-				}
-
-				if (!req.session.returnTo) {
-					res.status(200).send(nconf.get('relative_path') + '/');
-				} else {
-					var next = req.session.returnTo;
-					delete req.session.returnTo;
-
-					res.status(200).send(next);
-				}
-			});
-		}
-	})(req, res, next);
 }
 
 function doLogin(req, uid, callback) {
